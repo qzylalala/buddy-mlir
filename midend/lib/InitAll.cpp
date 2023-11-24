@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/CAPI/IR.h"
 
 #include "Dialect/Bud/BudDialect.h"
 #include "Dialect/DAP/DAPDialect.h"
@@ -20,6 +21,10 @@
 #include "Dialect/RVV/RVVDialect.h"
 #include "Dialect/Sche/ScheDialect.h"
 #include "Dialect/VectorExp/VectorExpDialect.h"
+#include "Target/LLVMIR/Dialect/Gemmini/GemminiToLLVMIRTranslation.h"
+#include "Target/LLVMIR/Dialect/RVV/RVVToLLVMIRTranslation.h"
+
+using namespace buddy;
 
 namespace mlir {
 namespace buddy {
@@ -44,6 +49,13 @@ namespace buddy {
 } // namespace buddy
 } // namespace mlir
 
+namespace buddy {
+void registerGemminiDialectTranslation(mlir::DialectRegistry &registry);
+void registerGemminiDialectTranslation(mlir::MLIRContext &context);
+void registerRVVDialectTranslation(mlir::DialectRegistry &registry);
+void registerRVVDialectTranslation(mlir::MLIRContext &context);
+} // namespace buddy
+
 void mlir::buddy::registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<::buddy::bud::BudDialect>();
   registry.insert<::buddy::dap::DAPDialect>();
@@ -52,6 +64,12 @@ void mlir::buddy::registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<::buddy::rvv::RVVDialect>();
   registry.insert<::buddy::sche::ScheDialect>();
   registry.insert<::buddy::vector_exp::VectorExpDialect>();
+}
+
+void mlir::buddy::registerAllLLVMTranslations(MlirContext context) {
+  auto &ctx = *unwrap(context);
+  ::buddy::registerRVVDialectTranslation(ctx);
+  ::buddy::registerGemminiDialectTranslation(ctx);
 }
 
 void mlir::buddy::registerAllPasses() {

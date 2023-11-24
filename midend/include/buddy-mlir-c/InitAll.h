@@ -10,12 +10,14 @@
 #ifndef BUDDY_MLIR_INITALL_H
 #define BUDDY_MLIR_INITALL_H
 
+#include "mlir-c/IR.h"
 #include "mlir/IR/Dialect.h"
 
 namespace mlir {
 namespace buddy {
 
 void registerAllDialects(mlir::DialectRegistry &registry);
+void registerAllLLVMTranslations(MlirContext context);
 void registerAllPasses();
 
 } // namespace buddy

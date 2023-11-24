@@ -23,4 +23,9 @@ void buddyMlirRegisterAllDialects(MlirContext context) {
   unwrap(context)->loadAllAvailableDialects();
 }
 
+void buddyMlirRegisterAllLLVMTranslations(MlirContext context) {
+  mlirRegisterAllLLVMTranslations(context);
+  mlir::buddy::registerAllLLVMTranslations(context);
+}
+
 void buddyMlirRegisterAllPasses() { mlir::buddy::registerAllPasses(); }

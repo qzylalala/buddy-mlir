@@ -29,4 +29,9 @@ PYBIND11_MODULE(_gemminiDialects, m) {
         }
       },
       py::arg("context") = py::none(), py::arg("load") = true);
+  gemminiM.def(
+      "register_buddy_translations",
+      [](MlirContext context) { 
+        mlirRegisterAllLLVMTranslations(context);
+        buddyMlirRegisterAllLLVMTranslations(context); });
 }

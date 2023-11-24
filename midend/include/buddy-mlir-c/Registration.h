@@ -12,6 +12,7 @@
 
 #include "mlir-c/IR.h"
 #include "mlir-c/Support.h"
+#include "mlir-c/RegisterEverything.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,6 +22,9 @@ extern "C" {
  * This is needed before creating IR for these Dialects.
  */
 MLIR_CAPI_EXPORTED void buddyMlirRegisterAllDialects(MlirContext context);
+
+/// Register all translations to LLVM IR for dialects that can support it.
+MLIR_CAPI_EXPORTED void buddyMlirRegisterAllLLVMTranslations(MlirContext context);
 
 /** Registers all passes for symbolic access with the global registry. */
 MLIR_CAPI_EXPORTED void buddyMlirRegisterAllPasses();

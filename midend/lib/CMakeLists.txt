@@ -27,6 +27,9 @@ set(LinkedLibs
   MatMulParallelVectorization
   SchedulingOnDevices
   TransposeOptimization
+
+  BuddyToLLVMIRTranslationRegistration
+  BuddyDIPUtils
 )
 
 
