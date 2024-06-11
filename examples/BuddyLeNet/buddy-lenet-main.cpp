@@ -16,6 +16,7 @@
 
 #include <buddy/Core/Container.h>
 #include <buddy/DIP/ImageContainer.h>
+#include <buddy/Utils/time.h>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -130,7 +131,10 @@ int main() {
   loadParameters(paramsDir, paramsContainer);
 
   // Call the forward function of the model.
+  double iStart = cpuSecond();
   _mlir_ciface_forward(&output, &paramsContainer, &input);
+  double iElaps = cpuSecond() - iStart;
+  std::cout << "Execution Time elapsed " << iElaps << " us." << endl;
 
   // Apply softmax to the output logits to get probabilities.
   auto out = output.getData();

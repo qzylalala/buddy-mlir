@@ -20,6 +20,9 @@ endif()
 
 project(buddy-mlir LANGUAGES CXX C)
 
+set(CMAKE_C_COMPILER "/usr/bin/gcc-10")
+set(CMAKE_CXX_COMPILER "/usr/bin/g++-10")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
@@ -228,7 +231,7 @@ add_custom_target(check-buddy
 #-------------------------------------------------------------------------------
 
 # Install frontend interfaces into include directory, so that the downstream project can use them in distribution
-install(DIRECTORY buddy/Core buddy/DAP buddy/DIP buddy/LLM
+install(DIRECTORY buddy/Core buddy/DAP buddy/DIP buddy/LLM buddy/Utils
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/buddy-mlir
   COMPONENT buddy-mlir-interfaces-headers
   FILES_MATCHING
