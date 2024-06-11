@@ -123,6 +123,9 @@ include_directories(${BUDDY_SOURCE_DIR}/lib)
 include_directories(${BUDDY_THIRDPARTY_INCLUDE_DIR})
 include_directories(${BUDDY_SOURCE_DIR}/frontend/Interfaces)
 
+# Add PIM files to the include path
+include_directories(${BUDDY_SOURCE_DIR}/libpim/include)
+
 # Add MLIR and LLVM headers to the include path
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
@@ -215,6 +218,7 @@ add_subdirectory(frontend)
 add_subdirectory(midend)
 add_subdirectory(backend)
 add_subdirectory(tools)
+add_subdirectory(libpim)
 add_subdirectory(examples)
 add_subdirectory(tests)
 

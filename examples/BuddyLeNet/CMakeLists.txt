@@ -17,6 +17,41 @@ add_custom_command(
   COMMENT "Building forward.o"
   VERBATIM)
 
+# add_custom_command(
+#   OUTPUT subgraph0.o
+#   COMMAND ${LLVM_MLIR_BINARY_DIR}/mlir-opt ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir 
+#             -pass-pipeline "builtin.module(func.func(tosa-to-linalg-named, tosa-to-linalg, tosa-to-tensor, tosa-to-arith))" |
+#           ${BUDDY_BINARY_DIR}/pim-opt
+#             -eliminate-empty-tensors
+#             -convert-tensor-to-linalg 
+#             -linalg-bufferize
+#             -convert-linalg-to-pim
+#             -lower-pim |
+#           ${BUDDY_BINARY_DIR}/buddy-opt
+#             -convert-linalg-to-affine-loops
+#             -lower-affine
+#             -func-bufferize-dynamic-offset
+#             -arith-bufferize
+#             -tensor-bufferize
+#             -buffer-deallocation
+#             -finalizing-bufferize
+#             -convert-vector-to-scf
+#             -expand-strided-metadata
+#             -convert-vector-to-llvm
+#             -convert-arith-to-llvm
+#             -finalize-memref-to-llvm
+#             -convert-scf-to-cf
+#             -llvm-request-c-wrappers
+#             -convert-arith-to-llvm
+#             -convert-func-to-llvm
+#             -reconcile-unrealized-casts | 
+#           ${LLVM_MLIR_BINARY_DIR}/mlir-translate -mlir-to-llvmir |
+#           ${LLVM_MLIR_BINARY_DIR}/llvm-as |
+#           ${LLVM_MLIR_BINARY_DIR}/llc -filetype=obj  -relocation-model=pic -O0 -o ${BUDDY_BINARY_DIR}/../examples/BuddyLeNet/subgraph0.o
+#   DEPENDS ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir
+#   COMMENT "Building subgraph0.o"
+#   VERBATIM)
+
 add_custom_command(
   OUTPUT subgraph0.o
   COMMAND ${LLVM_MLIR_BINARY_DIR}/mlir-opt ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir 
