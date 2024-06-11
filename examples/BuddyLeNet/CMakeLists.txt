@@ -21,10 +21,13 @@ add_custom_command(
   OUTPUT subgraph0.o
   COMMAND ${LLVM_MLIR_BINARY_DIR}/mlir-opt ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir 
             -pass-pipeline "builtin.module(func.func(tosa-to-linalg-named, tosa-to-linalg, tosa-to-tensor, tosa-to-arith))" |
-          ${BUDDY_BINARY_DIR}/buddy-opt
+          ${BUDDY_BINARY_DIR}/pim-opt
             -eliminate-empty-tensors
             -convert-tensor-to-linalg 
             -linalg-bufferize
+            -convert-linalg-to-pim
+            -lower-pim |
+          ${BUDDY_BINARY_DIR}/buddy-opt
             -convert-linalg-to-affine-loops
             -lower-affine
             -func-bufferize-dynamic-offset
@@ -49,6 +52,40 @@ add_custom_command(
   COMMENT "Building subgraph0.o"
   VERBATIM)
 
+# add_custom_command(
+#   OUTPUT subgraph0.o
+#   COMMAND ${LLVM_MLIR_BINARY_DIR}/mlir-opt ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir 
+#             -pass-pipeline "builtin.module(func.func(tosa-to-linalg-named, tosa-to-linalg, tosa-to-tensor, tosa-to-arith))" |
+#           ${BUDDY_BINARY_DIR}/buddy-opt
+#             -eliminate-empty-tensors
+#             -convert-tensor-to-linalg 
+#             -linalg-bufferize
+#             -convert-linalg-to-affine-loops
+#             -lower-affine
+#             -func-bufferize-dynamic-offset
+#             -arith-bufferize
+#             -tensor-bufferize
+#             -buffer-deallocation
+#             -finalizing-bufferize
+#             -convert-vector-to-scf
+#             -expand-strided-metadata
+#             -convert-vector-to-llvm
+#             -convert-arith-to-llvm
+#             -finalize-memref-to-llvm
+#             -convert-scf-to-cf
+#             -llvm-request-c-wrappers
+#             -convert-arith-to-llvm
+#             -convert-func-to-llvm
+#             -reconcile-unrealized-casts | 
+#           ${LLVM_MLIR_BINARY_DIR}/mlir-translate -mlir-to-llvmir |
+#           ${LLVM_MLIR_BINARY_DIR}/llvm-as |
+#           ${LLVM_MLIR_BINARY_DIR}/llc -filetype=obj  -relocation-model=pic -O0 -o ${BUDDY_BINARY_DIR}/../examples/BuddyLeNet/subgraph0.o
+#   DEPENDS ${BUDDY_EXAMPLES_DIR}/BuddyLeNet/subgraph0.mlir
+#   COMMENT "Building subgraph0.o"
+#   VERBATIM)
+
+set(CMAKE_C_COMPILER "/usr/bin/gcc-10")
+set(CMAKE_CXX_COMPILER "/usr/bin/g++-10")
 add_library(LENET STATIC subgraph0.o forward.o)
 
 SET_TARGET_PROPERTIES(LENET PROPERTIES LINKER_LANGUAGE C)
@@ -56,5 +93,5 @@ SET_TARGET_PROPERTIES(LENET PROPERTIES LINKER_LANGUAGE C)
 add_executable(buddy-lenet-run buddy-lenet-main.cpp)
 target_link_directories(buddy-lenet-run PRIVATE ${LLVM_MLIR_LIBRARY_DIR})
 
-set(BUDDY_LENET_LIBS LENET mlir_c_runner_utils ${OpenCV_LIBS})
+set(BUDDY_LENET_LIBS LENET mlirInterface mlir_c_runner_utils ${OpenCV_LIBS})
 target_link_libraries(buddy-lenet-run ${BUDDY_LENET_LIBS})

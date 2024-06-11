@@ -20,6 +20,9 @@ endif()
 
 project(buddy-mlir LANGUAGES CXX C)
 
+# set(CMAKE_C_COMPILER "/usr/bin/gcc-10")
+# set(CMAKE_CXX_COMPILER "/usr/bin/g++-10")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
@@ -120,6 +123,9 @@ include_directories(${BUDDY_SOURCE_DIR}/lib)
 include_directories(${BUDDY_THIRDPARTY_INCLUDE_DIR})
 include_directories(${BUDDY_SOURCE_DIR}/frontend/Interfaces)
 
+# Add PIM files to the include path
+include_directories(${BUDDY_SOURCE_DIR}/libpim/include)
+
 # Add MLIR and LLVM headers to the include path
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
@@ -212,6 +218,7 @@ add_subdirectory(frontend)
 add_subdirectory(midend)
 add_subdirectory(backend)
 add_subdirectory(tools)
+add_subdirectory(libpim)
 add_subdirectory(examples)
 add_subdirectory(tests)
 
@@ -228,7 +235,7 @@ add_custom_target(check-buddy
 #-------------------------------------------------------------------------------
 
 # Install frontend interfaces into include directory, so that the downstream project can use them in distribution
-install(DIRECTORY buddy/Core buddy/DAP buddy/DIP buddy/LLM
+install(DIRECTORY buddy/Core buddy/DAP buddy/DIP buddy/LLM buddy/Utils
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/buddy-mlir
   COMPONENT buddy-mlir-interfaces-headers
   FILES_MATCHING
