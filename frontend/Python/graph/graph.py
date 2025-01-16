@@ -330,6 +330,101 @@ class Graph:
         """
         self.lower_to_top_level_ir()
         self.lower_to_llvm_ir()
+        
+    def to_dot(self):
+        """
+        Converts a buddy graph to a DOT string for visualization.
+
+        Returns:
+            str: A DOT string representing the buddy graph for visualization.
+        """
+        dot = graphviz.Digraph(comment="Buddy Graph")
+        # Construct main graph
+        for op in self._body:
+            for child in op._children:
+                dot.edge(op._name, child)
+        # Draw node
+        node_map_device = {}
+        for subgraph_name, ops in self.op_groups.items():
+            for op in ops:
+                node_map_device[op.name] = self.group_map_device[
+                    subgraph_name
+                ]
+        for op in self._body:
+            if isinstance(op, PlaceholderOp) or isinstance(op, OutputOp):
+                dot.node(
+                    op._name, shape="ellipse", fillcolor="white", style="filled"
+                )
+            elif node_map_device[op.name] == DeviceType.CPU:
+                dot.node(op._name, shape="box", fillcolor="deepskyblue", style="filled")
+            else:
+                dot.node(
+                    op._name,
+                    shape="box",
+                    fillcolor="red",
+                    style="filled",
+                )
+        return str(dot)
+
+    def to_json(self):
+        """
+        Converts a buddy graph to a JSON string.
+
+        Returns:
+            str: A JSON string representing the buddy graph.
+        """
+        json_str = json.dumps(self, cls=BuddyGraphEncoder)
+        return json_str
+
+
+class BuddyGraphEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder for converting Buddy Graph objects to JSON strings.
+
+    This encoder handles encoding of Graph, Op, TensorMeta, OpType, TensorDType,
+    and DeviceType objects to their JSON representation.
+
+    Returns:
+        JSONEncoder: A JSON encoder instance for Buddy Graph objects.
+    """
+
+    def default(self, obj):
+        if isinstance(obj, Graph):
+            node_map_device = {}
+            for subgraph_name, ops in obj.op_groups.items():
+                for op in ops:
+                    node_map_device[op.name] = obj.group_map_device[
+                        subgraph_name
+                    ]
+            return {
+                "graph_name": obj._func_name,
+                "nodes": obj._body,
+                "device": obj.device,
+                "params": obj._fake_params,
+                "inputs": obj._inputs,
+                "node_map_device": node_map_device,
+            }
+        elif isinstance(obj, Op):
+            return {
+                "name": obj._name,
+                "children": obj._children,
+                "parents": obj._parents,
+                "arguments": obj._arguments,
+                "keyword_arguments": obj._keyword_arguments,
+                "tensor_meta": obj._tensor_meta,
+                "type": obj._op_type,
+                "class": obj.__class__.__name__,
+            }
+        elif isinstance(obj, TensorMeta):
+            return {"shape": obj.shape, "dtype": obj.dtype}
+        elif isinstance(obj, OpType):
+            return obj._name_
+        elif isinstance(obj, TensorDType):
+            return obj._name_
+        elif isinstance(obj, DeviceType):
+            return obj._value_
+        else:
+            return super().default(obj)
 
     def to_dot(self):
         """

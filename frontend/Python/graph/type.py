@@ -92,4 +92,6 @@ class DeviceType(Enum):
     """
     CPU = 'cpu'
     GPU = 'gpu'
+    PIM = 'pim'
+    HETER = 'heter'
     UNKNOW = 'unknow'

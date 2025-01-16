@@ -18,5 +18,10 @@
 #
 # ===---------------------------------------------------------------------------
 
-from .fuse_ops import simply_fuse, gpu_fuse
+from .fuse_ops import (
+    simply_fuse,
+    heter_fuse_lenet,
+    pim_fuse
+)
+
 from .useless_op_eliminate import maxpool2d_simplify
