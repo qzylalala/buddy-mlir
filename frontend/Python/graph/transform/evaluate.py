@@ -1,3 +1,4 @@
+from colorama import Fore
 from typing import Dict, List
 import logging
 import math
@@ -7,8 +8,171 @@ from ..operation import *
 from .. import DeviceType
 
 logging.basicConfig(
-    level=logging.DEBUG
+    level=logging.INFO
 )
+
+
+def dtype2bytes(dtype: TensorDType):
+    factor = 4
+    if dtype is TensorDType.Float16:
+        factor = 2
+    elif dtype is TensorDType.Float32:
+        factor = 4
+    elif dtype is TensorDType.Float64:
+        factor = 8
+    elif dtype is TensorDType.Int32:
+        factor = 4
+    elif dtype is TensorDType.Int64:
+        factor = 8
+    elif dtype is TensorDType.Bool:
+        factor = 1
+    else:
+        print("node_dtype: " + str(dtype) + " is not supported.")
+    return factor
+
+
+def calc_memcpy(
+    graph: Graph,
+    device_type: DeviceType = DeviceType.PIM
+):    
+    global acc
+    # this function can be used by all Accelerators, we mainly focus on PIM Acc.
+    if device_type is DeviceType.PIM:
+        acc = PIMAcc(DeviceType.PIM)
+    # We can only pay attention to subgraphs offloaded to Acc.
+    # 1. transfer input args from Host to Acc.
+    # 2. transfer output from Acc to Host.
+    global input_bytes, output_bytes, memcpy_h2d, memcpy_d2h
+    input_bytes, output_bytes = 0, 0
+    memcpy_h2d, memcpy_d2h = 0., 0.
+    
+    subgraphs_inputs, subgraphs_outputs = {}, {}
+    # Identify inputs for each subgraph
+    for subgraph_name in graph.op_groups.keys():
+        subgraphs_inputs[subgraph_name] = []
+        for op in graph.op_groups[subgraph_name]:
+            for parent in op._parents:
+                if (
+                    graph.node_table[parent]
+                    not in graph.op_groups[subgraph_name]
+                ):
+                    subgraphs_inputs[subgraph_name].append(parent)
+    # Identify output nodes of the entire graph
+    output_node = []
+    for node in graph.body:
+        if isinstance(node, OutputOp):
+            for arg in node.args:
+                output_node.append(arg)
+    # Identify outputs for each subgraph
+    for subgraph_name in graph.op_groups.keys():
+        subgraphs_outputs[subgraph_name] = []
+        for op in graph.op_groups[subgraph_name]:
+            for key in subgraphs_inputs.keys():
+                if op.name in subgraphs_inputs[key]:
+                    subgraphs_outputs[subgraph_name].append(op.name)
+            if (op.name in output_node) and (
+                op.name not in subgraphs_outputs[subgraph_name]
+            ):
+                subgraphs_outputs[subgraph_name].append(op.name)
+    # Calculate latency
+    input_databytes, output_databytes = [], []
+    for subgraph_name in graph.op_groups.keys():
+        device_type = subgraph_name.split('-')[2]
+        if device_type != "pim":
+            continue
+        # print(subgraph_name)
+        subgraph_inputs, subgraph_output = subgraphs_inputs[subgraph_name], subgraphs_outputs[subgraph_name]
+        # print("input tensor info")
+        input_data, output_data = 0, 0
+        for inp in subgraph_inputs:
+            node = graph.node_table[inp]
+            node_shape = node.tensor_meta["shape"]
+            node_dtype = node.tensor_meta["dtype"]
+            # print(node.tensor_meta)
+            factor = dtype2bytes(node_dtype)
+            data_bytes = node_shape.numel() * factor
+            input_data = input_data + data_bytes
+        input_databytes.append(input_data)
+        # print("output tensor info")
+        for output in subgraph_output:
+            node = graph.node_table[output]
+            # print(node.tensor_meta)
+            node_shape = node._tensor_meta["shape"]
+            node_dtype = node._tensor_meta["dtype"]
+            factor = dtype2bytes(node_dtype)
+            data_bytes = node_shape.numel() * factor
+            output_data = output_data + data_bytes
+        output_databytes.append(output_data)
+    memcpy_h2d_list, memcpy_d2h_list = [], []
+    for input_data in input_databytes:
+        input_bytes = input_bytes + input_data
+        memcpy_latency = acc.memcpy(input_data * 8, 0)
+        memcpy_h2d = memcpy_h2d + memcpy_latency
+        memcpy_h2d_list.append(memcpy_latency)
+    for output_data in output_databytes:
+        output_bytes = output_bytes + output_data
+        memcpy_latency = acc.memcpy(output_data * 8, 1)
+        memcpy_d2h = memcpy_d2h + memcpy_latency
+        memcpy_d2h_list.append(memcpy_latency)
+    
+    print(Fore.GREEN + "    - Total Bytes transferred between Host and Acc: {} bytes, total memcpy latency is {} us.".format(input_bytes + output_bytes, memcpy_h2d + memcpy_d2h) + Fore.RESET)
+    print(Fore.GREEN + "        - Bytes transferred from Host to Acc: {} bytes, latency is {} us.".format(input_bytes, memcpy_h2d) + Fore.RESET)
+    print(Fore.GREEN + "        - Bytes transferred from Acc to Host: {} bytes, latency is {} us.".format(output_bytes, memcpy_d2h) + Fore.RESET)
+    return memcpy_h2d_list, memcpy_d2h_list
+
+
+def calc_computation(
+    graph: Graph,
+    device_type: DeviceType = DeviceType.PIM
+):
+    global acc
+    # this function can be used by all Accelerators, we mainly focus on PIM Acc.
+    if device_type is DeviceType.PIM:
+        acc = PIMAcc(DeviceType.PIM)
+    compute_latency = 0.
+    compute_latencys = []
+    for subgraph_name in graph.op_groups.keys():
+        subgraph_compute_latency = acc._piminfo['kern_launch_latency']
+        device_type = subgraph_name.split('-')[2]
+        if device_type != "pim":
+            continue
+        for op in graph.op_groups[subgraph_name]:
+            # get op input
+            inputs = []
+            for arg in op._arguments:
+                if type(arg) is str:
+                    inputs.append(list(graph.node_table[arg]._tensor_meta['shape']))
+            latency = acc.evaluate(op, inputs)
+            subgraph_compute_latency = subgraph_compute_latency + latency
+        compute_latencys.append(subgraph_compute_latency)
+    for latency in compute_latencys:
+        compute_latency = compute_latency + latency
+    print(Fore.GREEN + "    - Total compute latency of subgraphs offloaded to Acc is {} us".format(compute_latency) + Fore.RESET)
+    print(Fore.GREEN + "    - Total xbar write time is {}/{}".format(acc.write_times, acc._piminfo['endurance']) + Fore.RESET)
+    return compute_latencys
+
+
+def evaluate_graph(
+    graph: Graph
+):
+    memcpy_h2d_list, memcpy_d2h_list = calc_memcpy(graph)
+    compute_latency_list = calc_computation(graph)
+    assert len(memcpy_h2d_list) == len(compute_latency_list), "Number of subgraphs need to be same."
+    
+    # W/O double buffer
+    latency = 0.
+    for i in range(len(memcpy_h2d_list)):
+        latency = latency + memcpy_h2d_list[i] + compute_latency_list[i] + memcpy_d2h_list[i]
+    print(Fore.GREEN + "W/O double buffer, total latency of subgraphs offloaded to Acc is {} us".format(latency) + Fore.RESET)
+    
+    # With double buffer
+    # memcpy -> memcpy -> memcpy
+    #       compute   ->  compute  -> compute
+    latency = memcpy_h2d_list[0] + memcpy_d2h_list[0] + compute_latency_list[-1]
+    for i in range(1, len(memcpy_h2d_list)):
+        latency = latency + max(memcpy_h2d_list[i], compute_latency_list[i - 1]) + memcpy_d2h_list[i]
+    print(Fore.GREEN + "With double buffer, total latency of subgraphs offloaded to Acc is {} us".format(latency) + Fore.RESET)
+
 
 class Evaluater:
     """
@@ -101,74 +265,81 @@ class Hardware:
         device: DeviceType
     ) -> None:
         self._device = device
-        self._relu_latency = None
+        self._relu_latency = 0.
         self._relu_energy = 0.52            # mW
-        self._max_pooling_latency = None
+        self._max_pooling_latency = 0.
         self._max_pooling_energy = 0.4      # mW
-        self._transpose_latency = None
+        self._transpose_latency = 0.
         self._transpose_energy = None
 
 
 class PIMAcc(Hardware):
     def __init__(
         self,
-        device: DeviceType,
+        device: DeviceType = DeviceType.PIM,
         piminfo: Dict = None
     ) -> None:
         super().__init__(device)
+        self.write_times = 0
         # Set PIM Acc hardware info.
         if piminfo is not None:
             self._piminfo = piminfo
         else:
             self._piminfo = {
-                # 'OCC' default settings
-                {'tile_size': 2 * 2},           # nums
-                {'tile_rows': 2},               # nums
-                {'tile_cols': 2},               # nums
-                {'xbar_size': 64 * 64},         # nums
-                {'xbar_rows': 64},              # nums
-                {'xbar_cols': 64},              # nums
-                {'precision': 8},               # 8-bit per cell
-                {'compute_latency': 1.0},       # us/8-bit
-                {'write_latency': 2.5},         # us/8-bit
-                {'compute_energy': 200.0},      # fJ/8-bit
-                {'read_energy': 200.0},         # fJ/8-bit
-                {'write_energy': 200000.0},     # fJ/8-bit
-                {'endurance': 3.2 * 1e7},       # times
-                {'circuit_energy': 3.9 * 1e6},  # fJ @ 1.2GHz
-                {'input_buffer_energy': 5400},  # fJ/byte @ 1.5KB
-                {'output_buffer_energy': 5400}, # fJ/byte @ 1.5KB
-                {'gevm_energy': 40.0 * 1e3},    # fJ/GEVM for weighted sum
-                {'alu_energy': 2.11 * 1e3},     # fJ/ALU Operation
-                {'control_energy': 0.78 * 1e6}, # fJ
+                # default settings
+                'tile_size': 4 * 4,           # nums
+                'tile_rows': 4,               # nums
+                'tile_cols': 4,               # nums
+                'ima_size' : 8,               # nums
+                'ima_rows' : 2,               # nums
+                'ima_cols' : 4,               # nums
+                'xbar_size': 128 * 128,       # nums
+                'xbar_rows': 128,             # nums
+                'xbar_cols': 128,             # nums
+                'precision': 2,               # 2-bit per cell
+                'compute_latency': 1.8,       # us/32-bit
+                'write_latency': 1.0,        # us/32-bit
+                'compute_energy': 200.0,     # fJ/8-bit
+                'read_energy': 200.0,        # fJ/8-bit
+                'write_energy': 200000.0,    # fJ/8-bit
+                'endurance': 3.2 * 1e7,      # times
+                'circuit_energy': 3.9 * 1e6, # fJ @ 1.2GHz
+                'input_buffer_energy': 5400, # fJ/byte @ 1.5KB
+                'output_buffer_energy': 5400,# fJ/byte @ 1.5KB
+                'gevm_energy': 40.0 * 1e3,   # fJ/GEVM for weighted sum
+                'alu_energy': 2.11 * 1e3,    # fJ/ALU Operation
+                'control_energy': 0.78 * 1e6,# fJ
                 # other settings
-                {'load_latency': 0.1},          # us
-                {'store_latency': 0.1},         # us
-                {'adc_latency': 6.25},          # us
-                {'adc_power': 16.0 / 8},        # mW
-                {'dac_latency': 1.0},           # us
-                {'dac_power': 4.0 / (8 * 128)}, # mW
-                {'sa_latency': 0.0},            # us
-                {'sa_power': 0.2},              # mW
-                {'sh_latency': 0.0},            # us
-                {'sh_power': 0.0055},           # mW
-                {'transport_bw': 6.4},          # GB/s
-                {'transport_power': 10400},     # mW
+                'kern_launch_latency': 4,    # us
+                'ddr5_read_latency': 0.08,   # us/64 bytes
+                'ddr5_write_latency': 0.08,  # us/64 bytes
+                'load_latency': 0.1,         # us
+                'store_latency': 0.1,        # us
+                'adc_latency': 6.25,         # us
+                'adc_power': 16.0 / 8,       # mW
+                'dac_latency': 1.0,          # us
+                'dac_power': 4.0 / (8 * 128),# mW
+                'sa_latency': 0.0,           # us
+                'sa_power': 0.2,             # mW
+                'sh_latency': 0.0,           # us
+                'sh_power': 0.0055,          # mW
+                'transport_bw': 27.2,        # GB/s
+                'transport_power': 10400,    # mW
             }
-            self._hub = {
-                'vgg16': {
-                    'relu': [185.0, 256.0, 237.0, 193.0, 155.0, 148.0, 170.0, 135.0, 147.0, 130.0, 88.0, 82.0, 80.0, 32.0, 12.0],
-                    'maxpool2d': [425.0, 233.0, 545.0, 321.0, 93.0, 425.0, 233.0, 545.0, 321.0, 93.0, ],
-                    'transpose': [7.0, 10.0, 3.0],  
-                },
-                'resnet18': {
-                    'relu': [95.0, 76.0, 47.0, 69.0, 47.0, 78.0, 45.0, 76.0, 44.0, 78.0, 45.0, 93.0, 45.0, 73.0, 6.0, 31.0, 5.0],
-                    'maxpool2d': [175.0],
-                    'transpose': [3],
-                }
+        self._hub = {
+            'vgg16': {
+                'relu': [185.0, 256.0, 237.0, 193.0, 155.0, 148.0, 170.0, 135.0, 147.0, 130.0, 88.0, 82.0, 80.0, 32.0, 12.0],
+                'maxpool2d': [425.0, 233.0, 545.0, 321.0, 93.0, 425.0, 233.0, 545.0, 321.0, 93.0, ],
+                'transpose': [7.0, 10.0, 3.0],  
+            },
+            'resnet18': {
+                'relu': [95.0, 76.0, 47.0, 69.0, 47.0, 78.0, 45.0, 76.0, 44.0, 78.0, 45.0, 93.0, 45.0, 73.0, 6.0, 31.0, 5.0],
+                'maxpool2d': [175.0],
+                'transpose': [3],
             }
+        }
     
-    def im2col(input: List, kernel: List)-> float:
+    def im2col(self, input: List, kernel: List)-> float:
         # input     :   [N, H, W, C]
         # kernel    :   [F, H, W, C]
         # output    :   [N, H, W, F]
@@ -187,27 +358,35 @@ class PIMAcc(Hardware):
     )-> float:
         from math import ceil
         latency = 0.
-        rows = self._piminfo['tile_rows'] * self._piminfo['xbar_rows']
-        cols = self._piminfo['tile_cols'] * self._piminfo['xbar_cols'] * self._piminfo['precision'] / data_precision
-        weight_mapping_times = min(ceil(K, rows) * ceil(N, cols), ceil(N, rows) * ceil(K, cols))
-        input_comp_times = min(ceil(M, rows) * K, ceil(K, rows) * M)
+        rows = self._piminfo['tile_rows'] * self._piminfo['ima_rows'] *  self._piminfo['xbar_rows']
+        cols = self._piminfo['tile_cols'] * self._piminfo['ima_cols']* self._piminfo['xbar_cols'] * self._piminfo['precision'] / data_precision
+        weight_mapping_times = min(ceil(K / rows) * ceil(N / cols), ceil(N / rows) * ceil(K / cols))
+        self.write_times = self.write_times + weight_mapping_times
+        input_comp_times = min(ceil(M / rows) * K, ceil(K / rows) * M)
         # 1. for each mapping, we need write weight to PIM Acc.
-        mapping_latency = self._piminfo['write_latency'] * rows * cols * data_precision / 8
+        mapping_latency = self._piminfo['write_latency']
+        # print("mapping once latency: {}".format(mapping_latency))
+        # print("rows : {}, cols : {}, weight_mapping_times : {}, input_comp_times : {}".format(rows, cols, weight_mapping_times, input_comp_times))
         # 2. for each computing, we need go through DAC, Gevm(read), S&H, ADC, S&A, store
         # TODO: 可能 compute latency 已经包含了其他单元的时延，需要 double check.
-        computing_latency = self._piminfo['dac_latency'] + self._piminfo['compute_latency'] * rows * cols * data_precision / 8 +\
+        computing_latency = self._piminfo['dac_latency'] + \
+                            self._piminfo['compute_latency'] + \
                             self._piminfo['sh_latency'] + self._piminfo['adc_latency'] + self._piminfo['sa_latency'] +\
                             self._piminfo['store_latency']
-        latency = mapping_latency * weight_mapping_times + computing_latency + input_comp_times
+        # computing_latency = self._piminfo['compute_latency'] + self._piminfo['store_latency']
+        latency = mapping_latency * weight_mapping_times + computing_latency * input_comp_times * weight_mapping_times
         
         return latency
     
     def memcpy(
         self,
-        data_bits: int
+        data_bits: int,
+        type: int
     )-> float:
-        bandwidth = self._piminfo['transport_bw'] / 1024 / 1024 / 8 # GB/s -> bit/s
-        latency = 1000 * 1000 * data_bits / bandwidth # us
+        bandwidth = self._piminfo['transport_bw'] * 1024 * 1024 * 1024 * 8 # GB/s -> bit/s
+        latency = 0.
+        # transfer
+        latency = latency + 1000 * 1000 * data_bits / bandwidth # us
         
         return latency
     
@@ -222,10 +401,14 @@ class PIMAcc(Hardware):
         elif isinstance(op, TransposeOp):
             latency = latency + self._transpose_latency
         elif isinstance(op, MaxPool2dOp):
-            latency = latency + self._transpose_latency
-        elif isinstance(op, MatmulOp) or isinstance(op, AddMMOp):
+            latency = latency + self._max_pooling_latency
+        elif  isinstance(op, AddMMOp):
             # -> tosa.matmul and tosa.add
             input_mat, mat1, mat2 = inputs[0], inputs[1], inputs[2]
+            M, K, N = mat1[0], mat1[1], mat2[1]
+            latency = latency + self.mapping_and_calc(M, K, N)
+        elif isinstance(op, MatmulOp):
+            mat1, mat2 = inputs[0], inputs[1]
             M, K, N = mat1[0], mat1[1], mat2[1]
             latency = latency + self.mapping_and_calc(M, K, N)
         elif isinstance(op, BatchMatmulOp):
@@ -235,10 +418,10 @@ class PIMAcc(Hardware):
             latency = latency + self.mapping_and_calc(M, K, N)
         elif isinstance(op, Conv2dOp):
             # -> tosa.conv
-            input, kernel, bias = inputs[0], inputs[1], inputs[2]
+            input, kernel = inputs[0], inputs[1]
             assert len(input) == 4 and len(kernel) == 4
             inp, krnl = self.im2col(input, kernel)
-            M, K, N = inp[0], inp[1], inp[2]
+            M, K, N = inp[0], inp[1], krnl[1]
             latency = latency + self.mapping_and_calc(M, K, N)
         else:
             logging.error("Operation %s is not supported on PIM Acc" % (op._name))

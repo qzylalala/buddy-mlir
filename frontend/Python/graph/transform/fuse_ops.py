@@ -87,8 +87,9 @@ def heter_fuse_lenet(graph: Graph):
 
 # TODO: Evaluate
 
-
-def pim_fuse(graph: Graph):
+def pim_fuse(
+    graph: Graph,
+):
     """
     Function to fuse operations for PIM Accelerator.
     Set the device type to PIMAcc.
@@ -99,56 +100,108 @@ def pim_fuse(graph: Graph):
     Returns:
     - None: Modifies the input graph in place.
     """
-    subgraph_prefix = "subgraph-"
-    subgraph_idx = -1
-    subgraph_host_idxs, subgraph_device_idxs = [], []
-    group_host, group_device = [], []
-    host, acc = DeviceType.CPU, DeviceType.PIM
-    device = DeviceType.CPU
-    for i, op in enumerate(graph.body):
-        # skip PlaceholderOp and OutputOp
-        if isinstance(op, PlaceholderOp) or isinstance(op, OutputOp):
-            continue
-        # offload to PIM Acc
-        if isinstance(op, MatmulOp) \
-        or isinstance(op, AddMMOp) \
-        or isinstance(op, BatchMatmulOp) \
-        or isinstance(op, Conv2dOp):
-            # TODO: offload according to cost function
-            # for arg in op._arguments:
-            #     if type(arg) is str:
-            #         print(graph.node_table[arg]._tensor_meta['shape'])
-            if device == DeviceType.PIM and len(group_device) != 0:
-                group_device[-1].append(op)
-            else:
+    
+    def pim_basic_fuse(
+        graph: Graph
+    ):
+        subgraph_idx = -1
+        subgraph_host_idxs, subgraph_device_idxs = [], []
+        group_host, group_device = [], []
+        device = DeviceType.CPU
+        for i, op in enumerate(graph.body):
+            # skip PlaceholderOp and OutputOp
+            if isinstance(op, PlaceholderOp) or isinstance(op, OutputOp):
+                continue
+            # offload to PIM Acc
+            if isinstance(op, MatmulOp) \
+            or isinstance(op, AddMMOp) \
+            or isinstance(op, BatchMatmulOp) \
+            or isinstance(op, Conv2dOp) \
+            or isinstance(op, ReluOp) \
+            or isinstance(op, MaxPool2dOp) \
+            or isinstance(op, TransposeOp):
+                # TODO: offload according to cost function
                 device = DeviceType.PIM
                 subgraph_idx = subgraph_idx + 1
                 group_device_tmp = [op]
                 group_device.append(group_device_tmp)
                 subgraph_device_idxs.append(subgraph_idx)
-            continue
-        # offload to CPU
-        if device == DeviceType.CPU and len(group_host) != 0:
-            group_host[-1].append(op)
-        else:
-            device = DeviceType.CPU
-            subgraph_idx = subgraph_idx + 1
-            group_host_tmp = [op]
-            group_host.append(group_host_tmp)
-            subgraph_host_idxs.append(subgraph_idx)
+                continue
+            # offload to CPU
+            if device == DeviceType.CPU and len(group_host) != 0:
+                group_host[-1].append(op)
+            else:
+                device = DeviceType.CPU
+                subgraph_idx = subgraph_idx + 1
+                group_host_tmp = [op]
+                group_host.append(group_host_tmp)
+                subgraph_host_idxs.append(subgraph_idx)
+        return group_host, subgraph_host_idxs, group_device, subgraph_device_idxs
+
+
+    def pim_greedy_fuse(
+        graph: Graph
+    ):
+        subgraph_idx = -1
+        subgraph_host_idxs, subgraph_device_idxs = [], []
+        group_host, group_device = [], []
+        device = DeviceType.CPU
+        for i, op in enumerate(graph.body):
+            # skip PlaceholderOp and OutputOp
+            if isinstance(op, PlaceholderOp) or isinstance(op, OutputOp):
+                continue
+            # offload to PIM Acc
+            if isinstance(op, MatmulOp) \
+            or isinstance(op, AddMMOp) \
+            or isinstance(op, BatchMatmulOp) \
+            or isinstance(op, Conv2dOp) \
+            or isinstance(op, ReluOp) \
+            or isinstance(op, MaxPool2dOp) \
+            or isinstance(op, TransposeOp):
+                # TODO: offload according to cost function
+                if device == DeviceType.PIM and len(group_device) != 0:
+                    group_device[-1].append(op)
+                else:
+                    device = DeviceType.PIM
+                    subgraph_idx = subgraph_idx + 1
+                    group_device_tmp = [op]
+                    group_device.append(group_device_tmp)
+                    subgraph_device_idxs.append(subgraph_idx)
+                continue
+            # offload to CPU
+            if device == DeviceType.CPU and len(group_host) != 0:
+                group_host[-1].append(op)
+            else:
+                device = DeviceType.CPU
+                subgraph_idx = subgraph_idx + 1
+                group_host_tmp = [op]
+                group_host.append(group_host_tmp)
+                subgraph_host_idxs.append(subgraph_idx)
+        return group_host, subgraph_host_idxs, group_device, subgraph_device_idxs
+    
+    fuse_func = pim_greedy_fuse
+    
+    subgraph_prefix = "subgraph-"
+    host, acc = DeviceType.CPU, DeviceType.PIM
+    group_host, subgraph_host_idxs, group_device, subgraph_device_idxs = fuse_func(graph)
     # subgraph in host
-    print(Fore.GREEN + "Subgraphs offloaded to CPU." + Fore.RESET)
+    # print(Fore.GREEN + "Subgraphs offloaded to CPU." + Fore.RESET)
     for i, subgraph in enumerate(group_host):
-        dict = {i : subgraph}
-        print(dict)
+        dict = {subgraph_host_idxs[i] : subgraph}
+        # print(dict)
         set_subgraph(subgraph, graph,
                      subgraph_prefix + str(subgraph_host_idxs[i]),
                      host)
     # subgraph in acc
     print(Fore.GREEN + 'Subgraphs offloaded to PIM Acc.' + Fore.RESET)
     for i, subgraph in enumerate(group_device):
-        dict = {i : subgraph}
+        dict = {subgraph_device_idxs[i] : subgraph}
         print(dict)
         set_subgraph(subgraph, graph,
                      subgraph_prefix + str(subgraph_device_idxs[i]),
                      acc)
+    print(Fore.GREEN + 'There are ' + str(len(group_device)) + ' subgraphs offloaded to PIM Acc.' + Fore.RESET)
+   
+    # summary of memcpy and compute latency info
+    from .evaluate import evaluate_graph
+    evaluate_graph(graph)
