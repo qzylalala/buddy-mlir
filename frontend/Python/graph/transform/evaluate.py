@@ -123,16 +123,20 @@ def calc_memcpy(
 
 def calc_computation(
     graph: Graph,
+    model_name: str,
     device_type: DeviceType = DeviceType.PIM
 ):
     global acc
     # this function can be used by all Accelerators, we mainly focus on PIM Acc.
     if device_type is DeviceType.PIM:
         acc = PIMAcc(DeviceType.PIM)
+    host = CPU(DeviceType.CPU)
     compute_latency = 0.
     compute_latencys = []
+    host_latencys = []
     for subgraph_name in graph.op_groups.keys():
         subgraph_compute_latency = acc._piminfo['kern_launch_latency']
+        subgraph_host_compute_latency = 0.
         device_type = subgraph_name.split('-')[2]
         if device_type != "pim":
             continue
@@ -142,36 +146,72 @@ def calc_computation(
             for arg in op._arguments:
                 if type(arg) is str:
                     inputs.append(list(graph.node_table[arg]._tensor_meta['shape']))
+            # evaluate this op on Acc
             latency = acc.evaluate(op, inputs)
+            # evaluate this op on CPU
+            host_latency = host.evaluate(model_name, op, inputs)
+            # calculate compute latency
             subgraph_compute_latency = subgraph_compute_latency + latency
+            subgraph_host_compute_latency = subgraph_host_compute_latency + host_latency
         compute_latencys.append(subgraph_compute_latency)
+        host_latencys.append(subgraph_host_compute_latency)
     for latency in compute_latencys:
         compute_latency = compute_latency + latency
     print(Fore.GREEN + "    - Total compute latency of subgraphs offloaded to Acc is {} us".format(compute_latency) + Fore.RESET)
     print(Fore.GREEN + "    - Total xbar write time is {}/{}".format(acc.write_times, acc._piminfo['endurance']) + Fore.RESET)
-    return compute_latencys
+    return compute_latencys, host_latencys
+
+
+def get_subgraph_names(
+    graph: Graph
+):
+    subgraph_names = []
+    for subgraph_name in graph.op_groups.keys():
+        device_type = subgraph_name.split('-')[2]
+        if device_type != "pim":
+            continue
+        subgraph_names.append(subgraph_name)
+    
+    return subgraph_names
 
 
 def evaluate_graph(
-    graph: Graph
+    graph: Graph,
+    model_name: str
 ):
     memcpy_h2d_list, memcpy_d2h_list = calc_memcpy(graph)
-    compute_latency_list = calc_computation(graph)
-    assert len(memcpy_h2d_list) == len(compute_latency_list), "Number of subgraphs need to be same."
+    acc_compute_latency_list, host_compute_latency_list = calc_computation(graph, model_name)
+    assert len(memcpy_h2d_list) == len(acc_compute_latency_list), "Number of subgraphs need to be same."
     
     # W/O double buffer
     latency = 0.
     for i in range(len(memcpy_h2d_list)):
-        latency = latency + memcpy_h2d_list[i] + compute_latency_list[i] + memcpy_d2h_list[i]
+        latency = latency + memcpy_h2d_list[i] + acc_compute_latency_list[i] + memcpy_d2h_list[i]
     print(Fore.GREEN + "W/O double buffer, total latency of subgraphs offloaded to Acc is {} us".format(latency) + Fore.RESET)
     
     # With double buffer
     # memcpy -> memcpy -> memcpy
     #       compute   ->  compute  -> compute
-    latency = memcpy_h2d_list[0] + memcpy_d2h_list[0] + compute_latency_list[-1]
+    total_latency = memcpy_h2d_list[0] + memcpy_d2h_list[0] + acc_compute_latency_list[-1]
     for i in range(1, len(memcpy_h2d_list)):
-        latency = latency + max(memcpy_h2d_list[i], compute_latency_list[i - 1]) + memcpy_d2h_list[i]
-    print(Fore.GREEN + "With double buffer, total latency of subgraphs offloaded to Acc is {} us".format(latency) + Fore.RESET)
+        total_latency = total_latency + max(memcpy_h2d_list[i], acc_compute_latency_list[i - 1]) + memcpy_d2h_list[i]
+    print(Fore.GREEN + "With double buffer, total latency of subgraphs offloaded to Acc is {} us".format(total_latency) + Fore.RESET)
+    
+    # With Offload Strategy to decide whether this subgraph should be offloaded to PIM Acc.
+    subgraph_names = get_subgraph_names(graph)
+    reduced_latency = 0.
+    reduced_subgraphs = 0
+    print(Fore.GREEN + "We compare the latency of subgraphs offloaded to PIM Acc with latency on CPU." + Fore.RESET)
+    for i in range(len(memcpy_h2d_list)):
+        acc_latency = memcpy_h2d_list[i] + acc_compute_latency_list[i] + memcpy_d2h_list[i]
+        host_latency = host_compute_latency_list[i]
+        print("     - {}, host latency : {}, acc latency : {}".format(subgraph_names[i], host_latency, acc_latency))
+        if host_latency < acc_latency:
+            reduced_subgraphs = reduced_subgraphs + 1
+            reduced_latency = reduced_latency + acc_latency - host_latency
+            print(Fore.GREEN + "    Subgraph {} should not be offloaded to PIM Acc, host latency : {} us, PIM Acc latency : {} us".format(subgraph_names[i], host_latency, acc_latency) + Fore.RESET)
+    print(Fore.GREEN + "We will remove {} subgraphs, and benefit from this stategy with {} us".format(reduced_subgraphs, reduced_latency) + Fore.RESET)
+    print(Fore.GREEN + "Finally, the total latency of subgraphs offloaded to Acc is {} us".format(total_latency - reduced_latency) + Fore.RESET)
 
 
 class Evaluater:
@@ -326,18 +366,6 @@ class PIMAcc(Hardware):
                 'transport_bw': 27.2,        # GB/s
                 'transport_power': 10400,    # mW
             }
-        self._hub = {
-            'vgg16': {
-                'relu': [185.0, 256.0, 237.0, 193.0, 155.0, 148.0, 170.0, 135.0, 147.0, 130.0, 88.0, 82.0, 80.0, 32.0, 12.0],
-                'maxpool2d': [425.0, 233.0, 545.0, 321.0, 93.0, 425.0, 233.0, 545.0, 321.0, 93.0, ],
-                'transpose': [7.0, 10.0, 3.0],  
-            },
-            'resnet18': {
-                'relu': [95.0, 76.0, 47.0, 69.0, 47.0, 78.0, 45.0, 76.0, 44.0, 78.0, 45.0, 93.0, 45.0, 73.0, 6.0, 31.0, 5.0],
-                'maxpool2d': [175.0],
-                'transpose': [3],
-            }
-        }
     
     def im2col(self, input: List, kernel: List)-> float:
         # input     :   [N, H, W, C]
@@ -432,34 +460,28 @@ class PIMAcc(Hardware):
 class CPU(Hardware):
     def __init__(
         self,
-        device: DeviceType
+        device: DeviceType = DeviceType.CPU
     ) -> None:
         super().__init__(device)
         # Set cpu info (Single Core).
-        import psutil
-        self._freq = psutil.cpu_freq() # MHz
-        self._latency_per_cycle = 1.0 / self._freq # us
+        # import psutil
+        # self._freq = float(psutil.cpu_freq()) # MHz
+        # self._latency_per_cycle = 1.0 / self._freq # us
         # this hub provided by pytorch profiling with AMD EPYC 9554 64-Core Processor.
         # we only consider operations which can be executed on both CPU and device.
+        # Conv2d, Addmm, Matmul, BatchMatmul
+        self.op_cnt = 0
         self._hub = {
-            'vgg16': {
-                'linear': [12093.0, 2830.0, 727.0],
-                'conv2d': [2939.0, 2413.0, 3407.0, 4198.0, 1760.0, 3642.0, 1701.0, 1073.0, 2280.0, 1533.0, 1404.0, 1429.0, 1453.0],
-                'relu': [185.0, 256.0, 237.0, 193.0, 155.0, 148.0, 170.0, 135.0, 147.0, 130.0, 88.0, 82.0, 80.0, 32.0, 12.0],
-                'maxpool2d': [425.0, 233.0, 545.0, 321.0, 93.0, 425.0, 233.0, 545.0, 321.0, 93.0, ],
-                'transpose': [7.0, 10.0, 3.0],  
-            },
-            'resnet18': {
-                'linear': [148.0],
-                'conv2d': [517.0, 505.0, 411.0, 405.0, 358.0, 464.0, 602.0, 354.0, 693.0, 676.0, 596.0, 698.0, 358.0, 756.0, 748.0, 640.0, 893.0, 381.0, 894.0, 902.0],
-                'relu': [95.0, 76.0, 47.0, 69.0, 47.0, 78.0, 45.0, 76.0, 44.0, 78.0, 45.0, 93.0, 45.0, 73.0, 6.0, 31.0, 5.0],
-                'maxpool2d': [175.0],
-                'transpose': [3],
-            }
+            'lenet5': [393.43520641326904, 150.36108016967773, 39.32187557220459, 5.050516128540038, 2.525258064270019],
+            'resnet18': [590.3377532958984, 243.64849090576172, 199.64149475097656, 206.08154296875, 213.59493255615234, 238.28178405761722, 254.38190460205078, 262.9686355590821, 250.08853912353516, 298.3889007568359, 268.33534240722656, 297.31555938720703, 193.20144653320312, 272.6287078857422, 272.6287078857422, 287.6554870605469, 479.7835922241211, 180.32135009765625, 463.6834716796875, 476.56356811523443, 2716.6270065307617],
+            'resnet34': [731.7181634902954, 650.4161453247071, 758.0217576026917, 473.4646940231323, 432.81368494033813, 339.55548763275146, 750.8480501174927, 373.0327892303467, 315.6431293487549, 246.2972903251648, 301.29571437835693, 308.4694218635559, 358.68537425994873, 423.2487416267395, 356.2941384315491, 356.2941384315491, 339.55548763275146, 466.29098653793335, 270.2096486091613, 483.02963733673096, 475.855929851532, 514.1157031059265, 540.4192972183226, 590.6352496147157, 609.7651362419127, 645.6336736679078, 576.2878346443176, 576.2878346443176, 573.896598815918, 437.59615659713745, 669.5460319519043, 322.8168368339539, 753.2392859458923, 772.3691725730896, 765.1954650878906, 753.2392859458923, 222.3849320411682],
+            'resnet50': [677.483766078949, 292.18494176864624, 288.97411823272705, 327.5040006637573, 244.0225887298584, 288.97411823272705, 263.28752994537354, 276.1308240890503, 276.1308240890503, 224.75764751434326, 340.3472948074341, 317.87153005599976, 369.2447066307068, 260.07670640945435, 1997.1322393417358, 446.30447149276733, 311.4498829841614, 317.87153005599976, 305.028235912323, 375.66635370254517, 266.4983534812927, 414.19623613357544, 337.1364712715149, 430.2503538131714, 459.1477656364441, 459.1477656364441, 369.2447066307068, 1637.5200033187866, 337.1364712715149, 369.2447066307068, 266.4983534812927, 317.87153005599976, 430.2503538131714, 263.28752994537354, 552.2616481781006, 494.4668245315552, 436.67200088500977, 555.4724717140198, 468.78023624420166, 475.20188331604004, 584.3698835372925, 600.4240012168884, 417.40705966949463, 507.31011867523193, 850.8682370185852, 430.2503538131714, 998.5661196708679, 452.7261185646057, 696.7487072944641, 353.19058895111084],
+            'resnet101': [746.3381767272949, 243.48621368408203, 269.9521064758301, 248.77939224243164, 264.65892791748047, 285.83164215087896, 344.0566062927246, 365.22932052612305, 307.0043563842773, 381.1088562011719, 354.6429634094238, 317.59071350097656, 370.52249908447266, 243.48621368408203, 1873.7852096557617, 301.7111778259277, 280.5384635925293, 243.48621368408203, 269.9521064758301, 275.2452850341797, 254.07257080078125, 259.36574935913086, 285.83164215087896, 338.763427734375, 391.6952133178711, 407.5747489929199, 269.9521064758301, 1513.8490676879883, 285.83164215087896, 423.45428466796875, 238.19303512573242, 291.1248207092286, 434.04064178466797, 264.65892791748047, 391.6952133178711, 566.3701057434082, 344.0566062927246, 492.2656059265137, 444.6269989013672, 344.0566062927246, 502.8519630432129, 524.0246772766113, 412.86792755126953, 508.1451416015625, 486.97242736816406, 354.6429634094238, 396.9883918762207, 338.763427734375, 307.0043563842773, 248.77939224243164],
         }
     
     def evaluate(
         self,
+        model_name: str,
         op: Op,
         inputs: List
     )-> float:
@@ -471,11 +493,17 @@ class CPU(Hardware):
         elif isinstance(op, MaxPool2dOp):
             latency = latency + self._max_pooling_latency
         elif isinstance(op, MatmulOp) or isinstance(op, AddMMOp):
-            pass
+            if model_name in self._hub.keys():
+                latency = self._hub[model_name][self.op_cnt]
+                self.op_cnt = self.op_cnt + 1
         elif isinstance(op, BatchMatmulOp):
-            pass
+            if model_name in self._hub.keys():
+                latency = self._hub[model_name][self.op_cnt]
+                self.op_cnt = self.op_cnt + 1
         elif isinstance(op, Conv2dOp):
-            pass
+            if model_name in self._hub.keys():
+                latency = self._hub[model_name][self.op_cnt]
+                self.op_cnt = self.op_cnt + 1
         else:
             logging.error("Operation %s is not supported on CPU" % (op._name))
         

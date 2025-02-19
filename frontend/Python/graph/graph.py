@@ -184,7 +184,7 @@ class Graph:
             self.group_map_device[subgraph_name] = DeviceType.CPU
             self.op_groups[subgraph_name] = group
 
-    def fuse_ops(self, pattern_list: List[FunctionType]):
+    def fuse_ops(self, pattern_list: List[FunctionType], model_name: str):
         """
         Fuse operations in the graph based on provided fusion patterns.
 
@@ -200,7 +200,7 @@ class Graph:
         # 2. common fuse strategy(hardware independent)
         # Apply fusion patterns
         for pattern_func in pattern_list:
-            pattern_func(self)
+            pattern_func(self, model_name)
         # Initialize operation groups
 
     def perform(self, func_list: List[FunctionType]):

@@ -89,6 +89,7 @@ def heter_fuse_lenet(graph: Graph):
 
 def pim_fuse(
     graph: Graph,
+    model_name: str
 ):
     """
     Function to fuse operations for PIM Accelerator.
@@ -180,15 +181,15 @@ def pim_fuse(
         return group_host, subgraph_host_idxs, group_device, subgraph_device_idxs
     
     fuse_func = pim_greedy_fuse
-    
+
     subgraph_prefix = "subgraph-"
     host, acc = DeviceType.CPU, DeviceType.PIM
     group_host, subgraph_host_idxs, group_device, subgraph_device_idxs = fuse_func(graph)
     # subgraph in host
-    # print(Fore.GREEN + "Subgraphs offloaded to CPU." + Fore.RESET)
+    print(Fore.GREEN + "Subgraphs offloaded to CPU." + Fore.RESET)
     for i, subgraph in enumerate(group_host):
         dict = {subgraph_host_idxs[i] : subgraph}
-        # print(dict)
+        print(dict)
         set_subgraph(subgraph, graph,
                      subgraph_prefix + str(subgraph_host_idxs[i]),
                      host)
@@ -200,8 +201,9 @@ def pim_fuse(
         set_subgraph(subgraph, graph,
                      subgraph_prefix + str(subgraph_device_idxs[i]),
                      acc)
+    print(Fore.GREEN + 'There are ' + str(len(group_host)) + ' subgraphs offloaded to CPU.' + Fore.RESET)
     print(Fore.GREEN + 'There are ' + str(len(group_device)) + ' subgraphs offloaded to PIM Acc.' + Fore.RESET)
    
     # summary of memcpy and compute latency info
     from .evaluate import evaluate_graph
-    evaluate_graph(graph)
+    evaluate_graph(graph, model_name)
