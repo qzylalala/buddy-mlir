@@ -162,6 +162,16 @@ def calc_computation(
     return compute_latencys, host_latencys
 
 
+def get_cpu_whole_latency(
+    model_name: str
+):
+    host = CPU(DeviceType.CPU)
+    if model_name in host._graph_cache.keys():
+        return host._graph_cache[model_name]
+    else:
+        return 0.
+
+
 def get_subgraph_names(
     graph: Graph
 ):
@@ -175,9 +185,37 @@ def get_subgraph_names(
     return subgraph_names
 
 
+def double_buffer(
+    memcpy_h2d_latency,
+    acc_compute_latency,
+    memcpy_d2h_latency,
+    device_type: DeviceType = DeviceType.PIM
+):
+    global acc
+    # this function can be used by all Accelerators, we mainly focus on PIM Acc.
+    if device_type is DeviceType.PIM:
+        acc = PIMAcc(DeviceType.PIM)
+    latency = 0.
+    half_scratchpad = acc._piminfo['scratchpad_capicity'] * 1024 / 2 # bytes
+    half_scratchpad_memcpy_time = acc.memcpy(half_scratchpad * 8, 0) # us
+
+    # When we use double buffer, we should make sure the data transferred should be less than half of scratchpad.
+    if memcpy_h2d_latency > half_scratchpad_memcpy_time:
+        split_times = math.floor(memcpy_h2d_latency / half_scratchpad_memcpy_time)
+        compute_latency = acc_compute_latency / split_times
+        last_time_memcpy_latency = memcpy_h2d_latency - half_scratchpad_memcpy_time * split_times
+        last_time_compute_latency = acc_compute_latency - compute_latency * split_times
+        latency = latency + half_scratchpad_memcpy_time + (split_times - 2) * max(half_scratchpad_memcpy_time, compute_latency) + max(last_time_memcpy_latency, compute_latency) + last_time_compute_latency + memcpy_d2h_latency
+    else:
+        latency = latency + memcpy_h2d_latency + acc_compute_latency + memcpy_d2h_latency
+    
+    return latency
+    
+
+
 def evaluate_graph(
     graph: Graph,
-    model_name: str
+    model_name: str,
 ):
     memcpy_h2d_list, memcpy_d2h_list = calc_memcpy(graph)
     acc_compute_latency_list, host_compute_latency_list = calc_computation(graph, model_name)
@@ -186,32 +224,51 @@ def evaluate_graph(
     # W/O double buffer
     latency = 0.
     for i in range(len(memcpy_h2d_list)):
+        # print("h2d : {}, compute : {}, d2h : {}".format(memcpy_h2d_list[i], acc_compute_latency_list[i], memcpy_d2h_list[i]))
         latency = latency + memcpy_h2d_list[i] + acc_compute_latency_list[i] + memcpy_d2h_list[i]
     print(Fore.GREEN + "W/O double buffer, total latency of subgraphs offloaded to Acc is {} us".format(latency) + Fore.RESET)
     
     # With double buffer
     # memcpy -> memcpy -> memcpy
     #       compute   ->  compute  -> compute
-    total_latency = memcpy_h2d_list[0] + memcpy_d2h_list[0] + acc_compute_latency_list[-1]
-    for i in range(1, len(memcpy_h2d_list)):
-        total_latency = total_latency + max(memcpy_h2d_list[i], acc_compute_latency_list[i - 1]) + memcpy_d2h_list[i]
+    total_latency = 0.
+    for i in range(0, len(memcpy_h2d_list)):
+        total_latency = total_latency + double_buffer(memcpy_h2d_list[i], acc_compute_latency_list[i], memcpy_d2h_list[i])
     print(Fore.GREEN + "With double buffer, total latency of subgraphs offloaded to Acc is {} us".format(total_latency) + Fore.RESET)
     
     # With Offload Strategy to decide whether this subgraph should be offloaded to PIM Acc.
     subgraph_names = get_subgraph_names(graph)
-    reduced_latency = 0.
     reduced_subgraphs = 0
+    remain_memcpy_h2d_list, remain_acc_compute_list, remain_memcpy_d2h_list = [], [], []
+    cpu_whole_latency = get_cpu_whole_latency(model_name)
+    cpu_subgraphs_latency = 0.
+    cpu_extra_latency = 0.
     print(Fore.GREEN + "We compare the latency of subgraphs offloaded to PIM Acc with latency on CPU." + Fore.RESET)
     for i in range(len(memcpy_h2d_list)):
         acc_latency = memcpy_h2d_list[i] + acc_compute_latency_list[i] + memcpy_d2h_list[i]
         host_latency = host_compute_latency_list[i]
-        print("     - {}, host latency : {}, acc latency : {}".format(subgraph_names[i], host_latency, acc_latency))
+        cpu_subgraphs_latency = cpu_subgraphs_latency + host_latency
+        # print("     - {}, host latency : {}, acc latency : {}".format(subgraph_names[i], host_latency, acc_latency))
         if host_latency < acc_latency:
             reduced_subgraphs = reduced_subgraphs + 1
-            reduced_latency = reduced_latency + acc_latency - host_latency
-            print(Fore.GREEN + "    Subgraph {} should not be offloaded to PIM Acc, host latency : {} us, PIM Acc latency : {} us".format(subgraph_names[i], host_latency, acc_latency) + Fore.RESET)
-    print(Fore.GREEN + "We will remove {} subgraphs, and benefit from this stategy with {} us".format(reduced_subgraphs, reduced_latency) + Fore.RESET)
-    print(Fore.GREEN + "Finally, the total latency of subgraphs offloaded to Acc is {} us".format(total_latency - reduced_latency) + Fore.RESET)
+            cpu_extra_latency = cpu_extra_latency + host_latency
+            # print(Fore.GREEN + "    Subgraph {} should not be offloaded to PIM Acc, host latency : {} us, PIM Acc latency : {} us".format(subgraph_names[i], host_latency, acc_latency) + Fore.RESET)
+        else:
+            remain_memcpy_h2d_list.append(memcpy_h2d_list[i])
+            remain_acc_compute_list.append(acc_compute_latency_list[i])
+            remain_memcpy_d2h_list.append(memcpy_d2h_list[i])
+    # TODO: update the latency
+    acc_latency = 0.
+    for i in range(0, len(remain_memcpy_h2d_list)):
+        acc_latency = acc_latency + double_buffer(remain_memcpy_h2d_list[i], remain_acc_compute_list[i], remain_memcpy_d2h_list[i])
+    print(Fore.GREEN + "1. The total latency of all subgraphs offloaded to CPU is {} us".format(cpu_whole_latency) + Fore.RESET)
+    print(Fore.GREEN + "2. The total latency of graphs W/O double buffer is {} us".format(cpu_whole_latency - cpu_subgraphs_latency + latency) + Fore.RESET)
+    print(Fore.GREEN + "3. The total latency of graphs With double buffer is {} us".format(cpu_whole_latency - cpu_subgraphs_latency + total_latency) + Fore.RESET)
+    print(Fore.GREEN + "    - The total latency of subgraphs offloaded to CPU is {} us".format(cpu_whole_latency - cpu_subgraphs_latency) + Fore.RESET)
+    print(Fore.GREEN + "    - The total latency of subgraphs offloaded to PIMAcc is {} us".format(total_latency) + Fore.RESET)
+    print(Fore.GREEN + "We will remove {} subgraphs, and benefit from this stategy with {} us".format(reduced_subgraphs, cpu_extra_latency + total_latency - acc_latency) + Fore.RESET)
+    print(Fore.GREEN + "4. Finally, the total latency of these graph is {} us".format(cpu_whole_latency - cpu_subgraphs_latency + cpu_extra_latency + acc_latency) + Fore.RESET)
+    print(Fore.GREEN + "    - The total latency of subgraphs offloaded to PIMAcc is {} us".format(acc_latency) + Fore.RESET)
 
 
 class Evaluater:
@@ -327,12 +384,13 @@ class PIMAcc(Hardware):
         else:
             self._piminfo = {
                 # default settings
-                'tile_size': 4 * 4,           # nums
-                'tile_rows': 4,               # nums
-                'tile_cols': 4,               # nums
-                'ima_size' : 8,               # nums
-                'ima_rows' : 2,               # nums
+                'tile_nums': 168,             # nums
+                'tile_rows': 14,              # nums
+                'tile_cols': 12,              # nums
+                'ima_nums' : 12,              # nums
+                'ima_rows' : 3,               # nums
                 'ima_cols' : 4,               # nums
+                'xbar_nums': 8,               # nums
                 'xbar_size': 128 * 128,       # nums
                 'xbar_rows': 128,             # nums
                 'xbar_cols': 128,             # nums
@@ -350,6 +408,7 @@ class PIMAcc(Hardware):
                 'alu_energy': 2.11 * 1e3,    # fJ/ALU Operation
                 'control_energy': 0.78 * 1e6,# fJ
                 # other settings
+                'scratchpad_capicity': 256,  # KB
                 'kern_launch_latency': 4,    # us
                 'ddr5_read_latency': 0.08,   # us/64 bytes
                 'ddr5_write_latency': 0.08,  # us/64 bytes
@@ -382,7 +441,7 @@ class PIMAcc(Hardware):
     def mapping_and_calc(
         self,
         M: int, K: int, N: int,
-        data_precision: int = 16
+        data_precision: int = 32
     )-> float:
         from math import ceil
         latency = 0.
@@ -471,12 +530,21 @@ class CPU(Hardware):
         # we only consider operations which can be executed on both CPU and device.
         # Conv2d, Addmm, Matmul, BatchMatmul
         self.op_cnt = 0
+        self._graph_cache = {
+            "fc3": 24.4140625,
+            'lenet5': 721.502304077148,
+            'resnet18': 10733.413696289,
+            'resnet34': 23912.3582839965,
+            'resnet50': 32108.2353591918,
+            'resnet101': 52931.785583496,
+        }
         self._hub = {
-            'lenet5': [393.43520641326904, 150.36108016967773, 39.32187557220459, 5.050516128540038, 2.525258064270019],
-            'resnet18': [590.3377532958984, 243.64849090576172, 199.64149475097656, 206.08154296875, 213.59493255615234, 238.28178405761722, 254.38190460205078, 262.9686355590821, 250.08853912353516, 298.3889007568359, 268.33534240722656, 297.31555938720703, 193.20144653320312, 272.6287078857422, 272.6287078857422, 287.6554870605469, 479.7835922241211, 180.32135009765625, 463.6834716796875, 476.56356811523443, 2716.6270065307617],
-            'resnet34': [731.7181634902954, 650.4161453247071, 758.0217576026917, 473.4646940231323, 432.81368494033813, 339.55548763275146, 750.8480501174927, 373.0327892303467, 315.6431293487549, 246.2972903251648, 301.29571437835693, 308.4694218635559, 358.68537425994873, 423.2487416267395, 356.2941384315491, 356.2941384315491, 339.55548763275146, 466.29098653793335, 270.2096486091613, 483.02963733673096, 475.855929851532, 514.1157031059265, 540.4192972183226, 590.6352496147157, 609.7651362419127, 645.6336736679078, 576.2878346443176, 576.2878346443176, 573.896598815918, 437.59615659713745, 669.5460319519043, 322.8168368339539, 753.2392859458923, 772.3691725730896, 765.1954650878906, 753.2392859458923, 222.3849320411682],
-            'resnet50': [677.483766078949, 292.18494176864624, 288.97411823272705, 327.5040006637573, 244.0225887298584, 288.97411823272705, 263.28752994537354, 276.1308240890503, 276.1308240890503, 224.75764751434326, 340.3472948074341, 317.87153005599976, 369.2447066307068, 260.07670640945435, 1997.1322393417358, 446.30447149276733, 311.4498829841614, 317.87153005599976, 305.028235912323, 375.66635370254517, 266.4983534812927, 414.19623613357544, 337.1364712715149, 430.2503538131714, 459.1477656364441, 459.1477656364441, 369.2447066307068, 1637.5200033187866, 337.1364712715149, 369.2447066307068, 266.4983534812927, 317.87153005599976, 430.2503538131714, 263.28752994537354, 552.2616481781006, 494.4668245315552, 436.67200088500977, 555.4724717140198, 468.78023624420166, 475.20188331604004, 584.3698835372925, 600.4240012168884, 417.40705966949463, 507.31011867523193, 850.8682370185852, 430.2503538131714, 998.5661196708679, 452.7261185646057, 696.7487072944641, 353.19058895111084],
-            'resnet101': [746.3381767272949, 243.48621368408203, 269.9521064758301, 248.77939224243164, 264.65892791748047, 285.83164215087896, 344.0566062927246, 365.22932052612305, 307.0043563842773, 381.1088562011719, 354.6429634094238, 317.59071350097656, 370.52249908447266, 243.48621368408203, 1873.7852096557617, 301.7111778259277, 280.5384635925293, 243.48621368408203, 269.9521064758301, 275.2452850341797, 254.07257080078125, 259.36574935913086, 285.83164215087896, 338.763427734375, 391.6952133178711, 407.5747489929199, 269.9521064758301, 1513.8490676879883, 285.83164215087896, 423.45428466796875, 238.19303512573242, 291.1248207092286, 434.04064178466797, 264.65892791748047, 391.6952133178711, 566.3701057434082, 344.0566062927246, 492.2656059265137, 444.6269989013672, 344.0566062927246, 502.8519630432129, 524.0246772766113, 412.86792755126953, 508.1451416015625, 486.97242736816406, 354.6429634094238, 396.9883918762207, 338.763427734375, 307.0043563842773, 248.77939224243164],
+            "fc3": [16.826171875, 1.46484375],
+            'lenet5': [393.43520641326904, 150.36108016967773, 53.9683723449707, 7.647924423217773, 4.47331428527832],
+            'resnet18': [590.3377532958984, 243.64849090576172, 199.64149475097656, 206.08154296875, 213.59493255615234, 238.28178405761722, 254.38190460205078, 262.9686355590821, 250.08853912353516, 298.3889007568359, 268.33534240722656, 297.31555938720703, 193.20144653320312, 272.6287078857422, 272.6287078857422, 287.6554870605469, 479.7835922241211, 180.32135009765625, 463.6834716796875, 476.56356811523443, 2735.947151184082],
+            'resnet34': [731.7181634902954, 650.4161453247071, 758.0217576026917, 473.4646940231323, 432.81368494033813, 339.55548763275146, 750.8480501174927, 373.0327892303467, 315.6431293487549, 246.2972903251648, 301.29571437835693, 308.4694218635559, 358.68537425994873, 423.2487416267395, 356.2941384315491, 356.2941384315491, 339.55548763275146, 466.29098653793335, 270.2096486091613, 483.02963733673096, 475.855929851532, 514.1157031059265, 540.4192972183226, 590.6352496147157, 609.7651362419127, 645.6336736679078, 576.2878346443176, 576.2878346443176, 573.896598815918, 437.59615659713745, 669.5460319519043, 322.8168368339539, 753.2392859458923, 772.3691725730896, 765.1954650878906, 753.2392859458923, 263.03594112396246],
+            'resnet50': [459.2049837112427, 335.4192924499512, 395.31559467315674, 371.3570737838745, 367.36398696899414, 359.3778133392334, 387.329421043396, 375.3501605987549, 343.4054660797119, 379.34324741363525, 383.3363342285156, 491.14967823028564, 507.12202548980713, 347.3985528945923, 2819.119291305542, 511.1151123046875, 507.12202548980713, 363.37090015411377, 339.41237926483154, 559.032154083252, 311.46077156066895, 323.4400320053101, 539.0667200088501, 295.48842430114746, 487.1565914154053, 694.7971057891846, 355.384726524353, 2415.8175230026245, 395.31559467315674, 646.8800640106202, 367.36398696899414, 515.1081991195679, 686.8109321594238, 535.0736331939697, 347.3985528945923, 662.8524112701416, 339.41237926483154, 435.24646282196045, 682.8178453445435, 363.37090015411377, 551.0459804534911, 447.2257232666016, 511.1151123046875, 503.12893867492676, 818.5827970504761, 387.329421043396, 1050.1818323135376, 455.21189689636225, 694.7971057891846, 431.2533760070801, 467.1911573410034, 686.8109321594238, 427.2602891921997, 355.384726524353],
+            'resnet101': [391.20211601257324, 404.2421865463257, 326.00176334381104, 326.00176334381104, 319.4817280769348, 443.362398147583, 326.00176334381104, 371.6420102119446, 397.72215127944946, 319.4817280769348, 358.60193967819214, 475.9625744819641, 410.7622218132019, 502.042715549469, 1760.4095220565796, 508.5627508163452, 365.12197494506836, 462.92250394821167, 449.88243341445923, 358.60193967819214, 456.40246868133545, 417.2822570800781, 371.6420102119446, 443.362398147583, 352.0819044113159, 462.92250394821167, 352.0819044113159, 1343.1272649765015, 365.12197494506836, 443.362398147583, 339.0418338775635, 345.5618691444397, 515.0827860832214, 339.0418338775635, 312.9616928100586, 384.682080745697, 339.0418338775635, 332.52179861068726, 417.2822570800781, 312.9616928100586, 339.0418338775635, 423.80229234695435, 319.4817280769348, 319.4817280769348, 462.92250394821167, 345.5618691444397, 339.0418338775635, 417.2822570800781, 339.0418338775635, 332.52179861068726, 443.362398147583, 345.5618691444397, 326.00176334381104, 462.92250394821167, 352.0819044113159, 358.60193967819214, 417.2822570800781, 319.4817280769348, 332.52179861068726, 436.8423628807068, 358.60193967819214, 358.60193967819214, 449.88243341445923, 332.52179861068726, 319.4817280769348, 430.32232761383057, 345.5618691444397, 339.0418338775635, 443.362398147583, 352.0819044113159, 462.92250394821167, 704.1638088226318, 547.6829624176025, 593.3232092857361, 515.0827860832214, 339.0418338775635, 345.5618691444397, 560.723032951355, 391.20211601257324, 612.8833150863647, 710.683844089508, 665.0435972213745, 365.12197494506836, 443.362398147583, 345.5618691444397, 371.6420102119446, 710.683844089508, 456.40246868133545, 730.2439498901367, 678.083667755127, 612.8833150863647, 371.6420102119446, 652.0035266876221, 482.48260974884033, 665.0435972213745, 1108.4059953689575, 508.5627508163452, 573.7631034851074, 443.362398147583, 847.6045846939087, 371.6420102119446, 482.48260974884033, 925.8450078964233, 449.88243341445923, 391.20211601257324]
         }
     
     def evaluate(
